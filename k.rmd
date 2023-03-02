@@ -1,0 +1,136 @@
+---
+title: "IV v.1.2"
+author: "Kính"
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        code_folding: hide
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+source("~/Documents/libs.r")
+```
+
+## Skimming the data
+
+Number of obs before and after remove missing in either death status, survival
+time, or treatment group.
+
+```{r newdata}
+d <- readr::read_csv(here("./allmerged_posonly.csv"))
+nrow(d)
+d %<>% filter(!is.na(Death), !is.na(DSSTDY), !is.na(treatgroup))
+nrow(d)
+```
+
+Time distribution: 
+
+- remove one outlier, 
+- among deaths, the treatment group seemed to have a longer survival time overall
+
+```{r svtime}
+f1 <- d %>%
+    ggplot(aes(factor(Death), DSSTDY, fill = factor(treatgroup))) +
+    geom_boxplot()
+
+d %<>% filter(DSSTDY < 100)
+
+f2 <- d %>%
+    ggplot(aes(factor(Death), DSSTDY, fill = factor(treatgroup))) +
+    geom_boxplot() +
+    labs(title = 'remove time > 200')
+f1 + f2
+```
+
+Though, only in GIN, treatment group seemed to have a longer survival time.
+
+```{r}
+d %>%
+    ggplot(aes(factor(Death), DSSTDY, fill = factor(treatgroup))) +
+    geom_boxplot() +
+    facet_wrap(~COUNTRY)
+```
+
+Current way of treatment grouping, some study ID dont have both treatment groups.
+
+```{r}
+d %>%
+    ggplot(aes(factor(Death), DSSTDY, fill = factor(treatgroup))) +
+    geom_boxplot(position = position_dodge2(, "single")) +
+    facet_wrap(~STUDYID) +
+    coord_flip()
+```
+
+No relationship with age, it seems.
+
+```{r}
+d %>%
+    ggplot(aes(AGE, DSSTDY, color = factor(Death))) +
+    geom_point() +
+    facet_wrap(~STUDYID)
+```
+
+What is sex `U`? also seems sex is not a concern. Remove sex `U` for now.
+
+```{r}
+d %>%
+    ggplot(aes(SEX, DSSTDY, color = factor(SEX))) +
+    geom_boxplot(position = position_dodge2(, "single")) +
+    facet_wrap(~STUDYID)
+d %<>% filter(SEX != 'U')
+```
+
+## Simple survival models
+
+A hierarchical frailty survival model taking into potential correaltion within
+country and study center effect. In general:
+
+$$Survival\ time \sim LogLogistic(\alpha, \lambda)$$
+$$\lambda = \exp(intercept + treat + f_{age} + sex + i_i)$$
+
+where $i_i \sim N(0, \tau_c)$ are random effect of between individuals and 
+$f_{age}$ is a 1st-order random-walk effect allowing exploring nonlinear trends.
+
+> positive coefficient means **reducing** median survial time
+> negative coefficient means **increasing** median survial time
+
+```{r inla}
+# install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/testing"), dep=TRUE)
+library(INLA)
+
+formula <- inla.surv(DSSTDY, Death) ~ 1 + treatgroup +
+    f(AGE, model = 'iid') + SEX + f(STUDYID) + f(iid)
+
+d_inla <- d[, c("STUDYID", "COUNTRY", "SEX", "AGE", "Death", "DSSTDY", "treatgroup")] %>%
+    mutate(iid = 1:n())
+
+r = inla(formula,
+    family = "loglogisticsurv", data = d_inla,
+    control.family = list(variant = 1)
+)
+
+r$summary.fixed %>%
+    select(1:5) %>%
+    knitr::kable(digits = 2)
+
+
+r$summary.hyperpar %>%
+    select(1:5) %>%
+    knitr::kable(digits = 2)
+
+r$summary.random$AGE %>%
+    as_tibble() %>%
+    ggplot(aes(ID, mean, ymin = `0.025quant`, ymax = `0.975quant`)) +
+    geom_line() +
+    geom_ribbon(alpha = .3) +
+    labs(title = 'Nonlinear effect of age on survival time')
+```
+
+Remarks:
+
+- treatment increase survival time
+- male had shorter survival time
+- teenager had longer survival time than other ages
+- Teenageer seems to have shorter survival time, and higher with age increase or decreasing.
